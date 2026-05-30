@@ -15,6 +15,10 @@ workflows:
       - name: Pod install
         script: cd ios && pod install
       - name: Build iOS
-        script: flutter build ios --release --no-codesign
+        script: flutter build ios --release
     artifacts:
       - build/ios/ipa/*.ipa
+    publishing:
+      email:
+        recipients:
+          - 33122@qq.com
