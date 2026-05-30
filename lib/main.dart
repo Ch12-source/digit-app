@@ -1,20 +1,22 @@
-﻿import 'dart:io';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
-import 'package:path_provider/path_provider.dart';
+import 'cnn/shuffled_fusion_net.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final cameras = await availableCameras();
-  runApp(DigitApp(camera: cameras.first));
+  final model = ShuffledFusionNet();
+  await model.loadWeights();
+  runApp(DigitApp(camera: cameras.first, model: model));
 }
 
 class DigitApp extends StatelessWidget {
   final CameraDescription camera;
-  const DigitApp({super.key, required this.camera});
+  final ShuffledFusionNet model;
+  const DigitApp({super.key, required this.camera, required this.model});
 
   @override
   Widget build(BuildContext context) {
@@ -24,14 +26,15 @@ class DigitApp extends StatelessWidget {
       theme: ThemeData.dark().copyWith(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue, brightness: Brightness.dark),
       ),
-      home: DigitScreen(camera: camera),
+      home: DigitScreen(camera: camera, model: model),
     );
   }
 }
 
 class DigitScreen extends StatefulWidget {
   final CameraDescription camera;
-  const DigitScreen({super.key, required this.camera});
+  final ShuffledFusionNet model;
+  const DigitScreen({super.key, required this.camera, required this.model});
 
   @override
   State<DigitScreen> createState() => _DigitScreenState();
@@ -43,9 +46,6 @@ class _DigitScreenState extends State<DigitScreen> {
   double? _confidence;
   bool _processing = false;
 
-  // Method channel for native iOS model inference
-  static const _channel = MethodChannel('com.digit.app/inference');
-
   @override
   void initState() {
     super.initState();
@@ -56,16 +56,16 @@ class _DigitScreenState extends State<DigitScreen> {
     });
   }
 
-  /// 预处理：拍摄 -> 灰度 -> 反转 -> 缩放 28x28
-  Float64List _preprocess(img.Image image) {
+  /// 预处理：拍摄 -> 灰度 -> 反转 -> 缩放 28x28 -> 归一化
+  Float32List _preprocess(img.Image image) {
     final gray = img.grayscale(image);
     final resized = img.copyResize(gray, width: 28, height: 28);
 
-    final data = Float64List(28 * 28);
+    final data = Float32List(28 * 28);
     for (int y = 0; y < 28; y++) {
       for (int x = 0; x < 28; x++) {
         final p = resized.getPixel(x, y);
-        final inverted = 1.0 - (p.r / 255.0); // 反转
+        final inverted = 1.0 - (p.r / 255.0);
         data[y * 28 + x] = (inverted - 0.1307) / 0.3081;
       }
     }
@@ -84,23 +84,16 @@ class _DigitScreenState extends State<DigitScreen> {
       if (decoded != null) {
         final input = _preprocess(decoded);
 
-        // Call native iOS inference
-        try {
-          final result = await _channel.invokeMethod('predict', {
-            'input': input.toList(),
-          });
-          setState(() {
-            _prediction = result['digit'];
-            _confidence = (result['confidence'] as num).toDouble();
-          });
-        } catch (e) {
-          // Native inference not available, show placeholder
-          setState(() {
-            _prediction = 0;
-            _confidence = 0.99;
-          });
-          debugPrint('Native inference not available: $e');
-        }
+        final sw = Stopwatch()..start();
+        final result = widget.model.predict(input);
+        sw.stop();
+
+        setState(() {
+          _prediction = result.digit;
+          _confidence = result.confidence;
+        });
+
+        debugPrint('Predicted: ${result.digit} (${(result.confidence*100).toStringAsFixed(1)}%) in ${sw.elapsedMilliseconds}ms');
       }
     } catch (e) {
       debugPrint('Error: $e');
