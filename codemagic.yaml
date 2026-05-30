@@ -5,8 +5,23 @@
       flutter: stable
       xcode: latest
       cocoapods: default
+      vars:
+        APP_NAME: "DigitClassifier"
     scripts:
-      - flutter pub get
-      - flutter build ios --release --no-codesign
+      - name: Install dependencies
+        script: flutter pub get
+      - name: Build iOS
+        script: flutter build ios --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
+      - build/ios/iphoneos/Runner.app
+
+  android-build:
+    name: Android Build
+    environment:
+      flutter: stable
+    scripts:
+      - flutter pub get
+      - flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
