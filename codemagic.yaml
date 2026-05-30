@@ -6,8 +6,10 @@ workflows:
       xcode: latest
       cocoapods: default
     scripts:
-      - name: Generate iOS project
+      - name: Create iOS project
         script: flutter create . --platforms=ios --project-name=digit_app --org=com.shuffledfusion
+      - name: Use correct Podfile
+        script: cp -f ios/Podfile.fixed ios/Podfile
       - name: Flutter pub get
         script: flutter pub get
       - name: Pod install
