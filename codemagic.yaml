@@ -8,13 +8,22 @@
     scripts:
       - name: Generate iOS project
         script: flutter create . --platforms=ios --project-name=digit_app --org=com.shuffledfusion
-      - name: Restore custom files
-        script: |
-          cp -f ios/Runner/AppDelegate.custom.swift ios/Runner/AppDelegate.swift
+      - name: Restore custom AppDelegate
+        script: cp -f ios/Runner/AppDelegate.custom.swift ios/Runner/AppDelegate.swift
       - name: Add LibTorch to Podfile
         script: |
-          echo "pod 'LibTorch-Lite', '~>2.3.0'" | cat - ios/Podfile > ios/Podfile.tmp
-          mv ios/Podfile.tmp ios/Podfile
+          python3 -c "
+          import re
+          with open('ios/Podfile','r') as f:
+              content = f.read()
+          content = content.replace(
+              \"target 'Runner' do\",
+              \"target 'Runner' do\\n  pod 'LibTorch-Lite', '~>2.3.0'\"
+          )
+          with open('ios/Podfile','w') as f:
+              f.write(content)
+          print('LibTorch added to Podfile')
+          "
       - name: Pod install
         script: cd ios && pod install
       - name: Flutter pub get
