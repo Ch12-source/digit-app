@@ -10,14 +10,12 @@
         script: flutter create . --platforms=ios --project-name=digit_app --org=com.shuffledfusion
       - name: Restore custom AppDelegate
         script: cp -f ios/Runner/AppDelegate.custom.swift ios/Runner/AppDelegate.swift
-      - name: Add LibTorch to Podfile
+      - name: Add LibTorch
         script: |
-          cd ios
-          # Insert LibTorch before the flutter_install line
-          sed -i '' 's/flutter_install_all_ios_pods/pod "LibTorch-Lite", "~>2.3.0"\n  flutter_install_all_ios_pods/' Podfile
-      - name: Install CocoaPods
+          sed -i '' 's/flutter_install_all_ios_pods/pod "LibTorch-Lite", "~>2.3.0"\n  flutter_install_all_ios_pods/' ios/Podfile
+      - name: Pod install
         script: cd ios && pod install
-      - name: Install Flutter deps
+      - name: Flutter pub get
         script: flutter pub get
       - name: Build iOS
         script: flutter build ios --release --no-codesign
