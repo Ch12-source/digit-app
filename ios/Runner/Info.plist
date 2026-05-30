@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCameraUsageDescription</key>
+    <string>ShuffledFusionNet needs camera to recognize handwritten digits</string>
+    <key>CFBundleName</key>
+    <string>DigitClassifier</string>
+</dict>
+</plist>

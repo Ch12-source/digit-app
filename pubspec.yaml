@@ -1,0 +1,25 @@
+﻿name: digit_app
+description: ShuffledFusionNet - Handwritten Digit Recognition
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.10.5
+  image: ^4.1.0
+  pytorch_mobile: ^2.0.0
+  path_provider: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/shuffled_fusion_net.pt
