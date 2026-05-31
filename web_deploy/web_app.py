@@ -68,13 +68,17 @@ def preprocess(pil_img):
     arr = np.array(gray, dtype=np.float32)
     # 智能背景色判断：取边缘像素判断白底/黑底
     edge_width = 5
-    edge_pixels = np.concatenate([
-        arr[:edge_width, :],
-        arr[-edge_width:, :],
-        arr[edge_width:-edge_width, :edge_width],
-        arr[edge_width:-edge_width, -edge_width:]
-    ])
-    bg_mean = edge_pixels.mean()
+    h, w = arr.shape
+    if h > edge_width * 2 and w > edge_width * 2:
+        edge_pixels = np.concatenate([
+            arr[:edge_width, :],
+            arr[-edge_width:, :],
+            arr[edge_width:-edge_width, :edge_width],
+            arr[edge_width:-edge_width, -edge_width:]
+        ])
+        bg_mean = edge_pixels.mean()
+    else:
+        bg_mean = arr.mean()
     if bg_mean > 127.0:
         arr = 255.0 - arr  # 白底黑字 → 反色为黑底白字
     # 否则黑底白字，保持原样
