@@ -1,18 +1,17 @@
 ﻿# -*- coding: utf-8 -*-
 """
-手写数字识别 - Web端部署
-ShuffledFusionNetPlus V4 · 83K参数 · 99.19%准确率
-部署: Streamlit Cloud
+手写数字识别 - Web端部署 · 鲁棒预处理版
+ShuffledFusionNetPlus V4 · 83K · 99.19%
 """
 
 import streamlit as st
 import torch, torch.nn as nn, torch.nn.functional as F
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 import os
 
 # ============================================================
-# 模型定义: ShuffledFusionNetPlus (V4)
+# 模型定义 (同上)
 # ============================================================
 def channel_shuffle(x, g):
     b, c, h, w = x.shape
@@ -67,74 +66,98 @@ class ShuffledFusionNetPlus(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# 预处理（修复版：保留像素渐变，匹配 MNIST 分布）
+# 鲁棒预处理 v3：降噪 + 自适应 + 多策略回退
 # ============================================================
-def preprocess(pil_img):
+def preprocess(pil_img, debug=False):
     """
-    修复要点：
-    1. 反色（白纸黑字 → 黑底白字，匹配 MNIST）
-    2. 用阈值仅做「检测数字位置」，不做「二值化」
-    3. 保留 ROI 原始像素渐变（匹配 MNIST 抗锯齿边缘）
-    4. 拉伸对比度使背景≈0、前景≈255
+    鲁棒预处理流水线：
+    1. 缩放到合理尺寸（加速 + 去噪）
+    2. 高斯模糊降噪
+    3. 反色
+    4. 自适应阈值定位数字
+    5. 提取 ROI，保留原始渐变
+    6. 缩放到 20x20 → 居中 28x28
+    7. MNIST 标准化
     """
-    gray = pil_img.convert("L")
-    arr = np.array(gray, dtype=np.float32)
+    # Step 0: 缩放到 280x280（统一尺寸，降噪）
+    img_small = pil_img.convert("L").resize((280, 280), Image.LANCZOS)
 
-    # 1. 反色
+    # Step 1: 轻微高斯模糊降噪
+    img_blur = img_small.filter(ImageFilter.GaussianBlur(radius=1.0))
+    arr = np.array(img_blur, dtype=np.float32)
+
+    # Step 2: 反色
     arr = 255.0 - arr
 
-    # 2. 用阈值检测数字区域（仅用于定位，不影响像素值）
-    bin_mask = arr > 50
-    rows = np.any(bin_mask, axis=1)
-    cols = np.any(bin_mask, axis=0)
+    # Step 3: 自适应阈值（用均值 + 偏移，比固定阈值鲁棒）
+    global_mean = arr.mean()
+    threshold = max(20, global_mean * 1.5)  # 自适应：比全局均值亮 50%
+    binary = arr > threshold
+    rows = np.any(binary, axis=1)
+    cols = np.any(binary, axis=0)
+
+    # 回退策略1: 如果检测区域太大（>80%图像），降低阈值
+    if rows.sum() > len(rows) * 0.8:
+        threshold = max(10, global_mean * 0.8)
+        binary = arr > threshold
+        rows = np.any(binary, axis=1)
+        cols = np.any(binary, axis=0)
+
+    # 回退策略2: 如果还是没找到，尝试固定低阈值
     if not rows.any() or not cols.any():
-        # 宽松重试：降低阈值
-        bin_mask = arr > 20
-        rows = np.any(bin_mask, axis=1)
-        cols = np.any(bin_mask, axis=0)
-        if not rows.any() or not cols.any():
-            return None
+        binary = arr > 15
+        rows = np.any(binary, axis=1)
+        cols = np.any(binary, axis=0)
 
-    y1, y2 = np.where(rows)[0][[0, -1]]
-    x1, x2 = np.where(cols)[0][[0, -1]]
-
-    # 加 padding
-    h_img, w_img = arr.shape
-    pad = max(4, int(min(y2 - y1, x2 - x1) * 0.15))
-    y1 = max(0, y1 - pad)
-    y2 = min(h_img, y2 + pad + 1)
-    x1 = max(0, x1 - pad)
-    x2 = min(w_img, x2 + pad + 1)
-
-    # 3. 提取 ROI，保留原始渐变值
-    roi = arr[y1:y2, x1:x2]
-
-    # 4. 对比度拉伸：让背景趋近 0，前景保留渐变
-    p_low = np.percentile(roi, 5)   # 背景参考值
-    p_high = np.percentile(roi, 95)  # 前景参考值
-    if p_high - p_low > 10:
-        roi = (roi - p_low) / (p_high - p_low) * 255.0
-    roi = np.clip(roi, 0, 255)
-
-    # 5. 缩放到 20x20 区域内，保持宽高比
-    h, w = roi.shape
-    scale = 20.0 / max(h, w)
-    nh, nw = int(h * scale), int(w * scale)
-    if nh < 1 or nw < 1:
+    if not rows.any() or not cols.any():
         return None
 
-    roi_pil = Image.fromarray(roi.astype(np.uint8))
+    y_indices = np.where(rows)[0]
+    x_indices = np.where(cols)[0]
+    y1, y2 = y_indices[0], y_indices[-1]
+    x1, x2 = x_indices[0], x_indices[-1]
+
+    # Step 4: 检查 ROI 大小是否合理（< 90% 图像）
+    roi_h, roi_w = y2 - y1, x2 - x1
+    img_h, img_w = arr.shape
+    if roi_h > img_h * 0.9 and roi_w > img_w * 0.9:
+        return None  # 检测到整张图，说明没有数字
+
+    # Step 5: 加 padding（15%）
+    pad_y = max(4, int(roi_h * 0.15))
+    pad_x = max(4, int(roi_w * 0.15))
+    y1 = max(0, y1 - pad_y)
+    y2 = min(arr.shape[0], y2 + pad_y)
+    x1 = max(0, x1 - pad_x)
+    x2 = min(arr.shape[1], x2 + pad_x)
+
+    # Step 6: 提取 ROI（保留原始像素值 + 渐变）
+    roi = arr[y1:y2, x1:x2]
+
+    # Step 7: 缩放到 20x20
+    h, w = roi.shape
+    scale = 20.0 / max(h, w)
+    nh, nw = max(1, int(h * scale)), max(1, int(w * scale))
+    roi_pil = Image.fromarray(np.clip(roi, 0, 255).astype(np.uint8))
     roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
 
-    # 6. 居中放到 28x28 画布
+    # Step 8: 居中到 28x28
     canvas = np.zeros((28, 28), dtype=np.float32)
     ox, oy = (28 - nw) // 2, (28 - nh) // 2
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
 
-    # 7. MNIST 标准化
+    # Step 9: MNIST 标准化
     canvas = canvas / 255.0
     canvas = (canvas - 0.1307) / 0.3081
-    return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
+
+    tensor = torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
+
+    if debug:
+        # 返回预处理可视化
+        vis = (canvas - canvas.min()) / (canvas.max() - canvas.min() + 1e-8) * 255
+        return tensor, Image.fromarray(vis.astype(np.uint8))
+
+    return tensor
 
 # ============================================================
 # 加载模型
@@ -143,7 +166,8 @@ def preprocess(pil_img):
 def load_model():
     m = ShuffledFusionNetPlus()
     path = os.path.join(os.path.dirname(__file__), "best_model.pth")
-    m.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    m.load_state_dict(state)
     m.eval()
     return m
 
@@ -153,24 +177,31 @@ def load_model():
 st.set_page_config(page_title="手写数字识别", page_icon="✍️", layout="centered")
 
 st.title("✍️ 手写数字识别")
-st.caption("ShuffledFusionNetPlus V4 · 83K · 99.19% · 综合数据增强")
+st.caption("ShuffledFusionNetPlus V4 · 99.19% · 综合数据增强")
 
 model = load_model()
 
 tab1, tab2 = st.tabs(["📸 拍照识别", "📁 上传图片"])
 
 with tab1:
-    st.caption("对准白纸上的手写数字拍照（光线均匀效果最佳）")
+    st.caption("对准白纸上的手写数字拍照（光线均匀、数字居中效果最佳）")
     img_file = st.camera_input("", label_visibility="collapsed")
 
     if img_file is not None:
         image = Image.open(img_file).convert("RGB")
         st.image(image, width=224)
-        tensor = preprocess(image)
 
-        if tensor is None:
-            st.warning("⚠️ 未检测到数字，请确保数字清晰居中")
+        result = preprocess(image)
+        debug_vis = None
+
+        if result is None:
+            st.error("❌ 未检测到数字区域。请确保：\n- 白色纸张 + 深色笔书写\n- 数字占画面中央 30%~70%\n- 光线均匀，无明显阴影")
+        elif isinstance(result, tuple):
+            tensor, debug_vis = result
         else:
+            tensor = result
+
+        if result is not None:
             with torch.no_grad():
                 logits = model(tensor)
                 probs = F.softmax(logits, dim=1).squeeze().numpy()
@@ -182,21 +213,32 @@ with tab1:
                 st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
             with col2:
                 st.progress(float(conf), text=f"置信度: {conf*100:.1f}%")
-                if conf < 0.7:
-                    st.warning("⚠ 置信度偏低，建议重拍")
+
+            # 调试可视化
+            if st.checkbox("🔍 查看预处理效果（模型实际看到的图像）"):
+                if debug_vis:
+                    st.image(debug_vis, width=140, caption="28x28 预处理结果")
+                else:
+                    vis = (tensor.squeeze().numpy() - tensor.min()) / (tensor.max() - tensor.min() + 1e-8) * 255
+                    st.image(Image.fromarray(vis.astype(np.uint8)), width=140, caption="28x28 预处理结果")
+
+            if conf < 0.85:
+                st.warning(f"⚠ 置信度 {conf*100:.1f}%，建议重拍（确保白纸黑字、光线均匀、数字居中）")
 
 with tab2:
-    st.caption("上传手写数字图片（白底黑字，PNG/JPG/BMP）")
+    st.caption("上传手写数字图片（白纸黑字 PNG/JPG/BMP）")
     img_file = st.file_uploader("", type=["png", "jpg", "jpeg", "bmp"], label_visibility="collapsed")
 
     if img_file is not None:
         image = Image.open(img_file).convert("RGB")
         st.image(image, width=224)
-        tensor = preprocess(image)
 
-        if tensor is None:
-            st.warning("⚠️ 未检测到数字")
+        result = preprocess(image)
+
+        if result is None:
+            st.error("❌ 未检测到数字区域")
         else:
+            tensor = result
             with torch.no_grad():
                 logits = model(tensor)
                 probs = F.softmax(logits, dim=1).squeeze().numpy()
@@ -208,6 +250,10 @@ with tab2:
                 st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
             with col2:
                 st.progress(float(conf), text=f"置信度: {conf*100:.1f}%")
+
+            if st.checkbox("🔍 查看预处理效果"):
+                vis = (tensor.squeeze().numpy() - tensor.min()) / (tensor.max() - tensor.min() + 1e-8) * 255
+                st.image(Image.fromarray(vis.astype(np.uint8)), width=140, caption="28x28 预处理结果")
 
             top3 = np.argsort(probs)[::-1][:3]
             st.markdown("---")
@@ -216,6 +262,21 @@ with tab2:
             for i, idx in enumerate(top3):
                 with cols[i]:
                     st.metric(f"#{i+1}", str(idx), f"{probs[idx]*100:.1f}%")
+
+with st.expander("💡 拍照技巧（重要！）"):
+    st.markdown("""
+    **✓ 理想条件：**
+    - 📄 纯白纸张、无格线、无其他文字
+    - 🖊️ 黑色或深色笔书写，笔迹清晰
+    - 💡 光线均匀，避免阴影和反光
+    - 🎯 数字占画面 **30%~70%**，居中
+
+    **✗ 避免：**
+    - 📱 对屏幕拍照（产生摩尔纹）
+    - 🌓 半边亮半边暗的光线
+    - 📐 倾斜角度过大
+    - 📝 格子纸或有底纹的纸张
+    """)
 
 st.markdown("---")
 st.caption("ShuffledFusionNetPlus V4 · 蔡磊实践课 · 大数据综合实践")
