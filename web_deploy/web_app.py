@@ -67,38 +67,71 @@ class ShuffledFusionNetPlus(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# 预处理
+# 预处理（修复版：保留像素渐变，匹配 MNIST 分布）
 # ============================================================
 def preprocess(pil_img):
+    """
+    修复要点：
+    1. 反色（白纸黑字 → 黑底白字，匹配 MNIST）
+    2. 用阈值仅做「检测数字位置」，不做「二值化」
+    3. 保留 ROI 原始像素渐变（匹配 MNIST 抗锯齿边缘）
+    4. 拉伸对比度使背景≈0、前景≈255
+    """
     gray = pil_img.convert("L")
     arr = np.array(gray, dtype=np.float32)
-    arr = 255.0 - arr                      # 反色
-    arr = np.where(arr > 80, 255.0, 0.0)   # 二值化
 
-    rows = np.any(arr > 0, axis=1)
-    cols = np.any(arr > 0, axis=0)
+    # 1. 反色
+    arr = 255.0 - arr
+
+    # 2. 用阈值检测数字区域（仅用于定位，不影响像素值）
+    bin_mask = arr > 50
+    rows = np.any(bin_mask, axis=1)
+    cols = np.any(bin_mask, axis=0)
     if not rows.any() or not cols.any():
-        return None
+        # 宽松重试：降低阈值
+        bin_mask = arr > 20
+        rows = np.any(bin_mask, axis=1)
+        cols = np.any(bin_mask, axis=0)
+        if not rows.any() or not cols.any():
+            return None
 
     y1, y2 = np.where(rows)[0][[0, -1]]
     x1, x2 = np.where(cols)[0][[0, -1]]
-    pad = 4
-    y1, y2 = max(0, y1 - pad), min(arr.shape[0], y2 + pad + 1)
-    x1, x2 = max(0, x1 - pad), min(arr.shape[1], x2 + pad + 1)
+
+    # 加 padding
+    h_img, w_img = arr.shape
+    pad = max(4, int(min(y2 - y1, x2 - x1) * 0.15))
+    y1 = max(0, y1 - pad)
+    y2 = min(h_img, y2 + pad + 1)
+    x1 = max(0, x1 - pad)
+    x2 = min(w_img, x2 + pad + 1)
+
+    # 3. 提取 ROI，保留原始渐变值
     roi = arr[y1:y2, x1:x2]
 
+    # 4. 对比度拉伸：让背景趋近 0，前景保留渐变
+    p_low = np.percentile(roi, 5)   # 背景参考值
+    p_high = np.percentile(roi, 95)  # 前景参考值
+    if p_high - p_low > 10:
+        roi = (roi - p_low) / (p_high - p_low) * 255.0
+    roi = np.clip(roi, 0, 255)
+
+    # 5. 缩放到 20x20 区域内，保持宽高比
     h, w = roi.shape
     scale = 20.0 / max(h, w)
     nh, nw = int(h * scale), int(w * scale)
-    if nh < 1 or nw < 1: return None
+    if nh < 1 or nw < 1:
+        return None
 
     roi_pil = Image.fromarray(roi.astype(np.uint8))
     roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
 
+    # 6. 居中放到 28x28 画布
     canvas = np.zeros((28, 28), dtype=np.float32)
     ox, oy = (28 - nw) // 2, (28 - nh) // 2
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
 
+    # 7. MNIST 标准化
     canvas = canvas / 255.0
     canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
@@ -120,7 +153,7 @@ def load_model():
 st.set_page_config(page_title="手写数字识别", page_icon="✍️", layout="centered")
 
 st.title("✍️ 手写数字识别")
-st.caption("ShuffledFusionNetPlus V4 · 83K · 99.19% 准确率 · 综合数据增强训练")
+st.caption("ShuffledFusionNetPlus V4 · 83K · 99.19% · 综合数据增强")
 
 model = load_model()
 
@@ -183,14 +216,6 @@ with tab2:
             for i, idx in enumerate(top3):
                 with cols[i]:
                     st.metric(f"#{i+1}", str(idx), f"{probs[idx]*100:.1f}%")
-
-# ---- 说明 ----
-with st.expander("💡 使用技巧"):
-    st.markdown("""
-    - **拍照**: 白色纸张 + 黑色笔书写，光线均匀、避免阴影
-    - **上传**: 支持 PNG/JPG/BMP，白底黑字效果最佳
-    - 数字尽量居中、笔画清晰，占画面 60% 以上
-    """)
 
 st.markdown("---")
 st.caption("ShuffledFusionNetPlus V4 · 蔡磊实践课 · 大数据综合实践")
