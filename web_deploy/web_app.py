@@ -194,7 +194,7 @@ def preprocess(pil_img, debug=False):
 @st.cache_resource
 def load_model():
     m = ShuffledFusionNet()
-    path = os.path.join(os.path.dirname(__file__), "best_model.pth")
+    path = os.path.join(os.path.dirname(__file__), "best_model_plus.pth")
     state = torch.load(path, map_location="cpu", weights_only=True)
     m.load_state_dict(state)
     m.eval()
