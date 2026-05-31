@@ -61,7 +61,41 @@ class ShuffledFusionNet(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# 鲁棒预处理 v3：降噪 + 自适应 + 多策略回退
+# 预处理
+# ============================================================
+def preprocess(pil_img):
+    gray = pil_img.convert("L")
+    arr = np.array(gray, dtype=np.float32)
+    arr = 255.0 - arr
+    arr = np.where(arr > 80, 255.0, 0.0)
+
+    rows = np.any(arr > 0, axis=1)
+    cols = np.any(arr > 0, axis=0)
+    if not rows.any() or not cols.any():
+        return None
+
+    y1, y2 = np.where(rows)[0][[0, -1]]
+    x1, x2 = np.where(cols)[0][[0, -1]]
+    pad = 4
+    y1, y2 = max(0, y1 - pad), min(arr.shape[0], y2 + pad + 1)
+    x1, x2 = max(0, x1 - pad), min(arr.shape[1], x2 + pad + 1)
+    roi = arr[y1:y2, x1:x2]
+
+    h, w = roi.shape
+    scale = 20.0 / max(h, w)
+    nh, nw = int(h * scale), int(w * scale)
+    if nh < 1 or nw < 1: return None
+
+    roi_pil = Image.fromarray(roi.astype(np.uint8))
+    roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
+
+    canvas = np.zeros((28, 28), dtype=np.float32)
+    ox, oy = (28 - nw) // 2, (28 - nh) // 2
+    canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
+
+    canvas = canvas / 255.0
+    canvas = (canvas - 0.1307) / 0.3081
+    return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
 # ============================================================
 def preprocess(pil_img, debug=False):
     """
