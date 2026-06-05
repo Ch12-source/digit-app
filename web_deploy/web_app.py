@@ -2,7 +2,7 @@
 """
 Handwritten Digit Recognition - Web Deployment
 ShuffledFusionNet V4 - 39K - 98.46% - Data Augmentation
-Preprocessing: adaptive threshold + MaxFilter stroke dilation + pure black bg
+Preprocessing: adaptive threshold + morphological opening + stroke dilation + pure bg
 """
 
 import streamlit as st
@@ -62,18 +62,18 @@ class ShuffledFusionNet(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# Preprocessing: domain gap mitigation
-#   - Local adaptive threshold (handles uneven lighting/shadows)
-#   - MaxFilter stroke dilation (thin gel pen -> thick MNIST marker)
-#   - Pure black background via mask (no residual noise)
+# Preprocessing
+#   - Local adaptive threshold C=30 (filters bleed-through / grid lines)
+#   - Morphological opening: MinFilter(3) erode -> MaxFilter(7) dilate
+#   - Pure black bg via mask, ROI from eroded image
 #   - Final invert: digit=dark, bg=bright (80% training majority)
 # ============================================================
 def preprocess(pil_img):
-    # Step 1: grayscale + resize to 280x280 (standardized input)
+    # Step 1: grayscale + resize to 280x280
     img_small = pil_img.convert("L").resize((280, 280), Image.LANCZOS)
     arr = np.array(img_small, dtype=np.float32)
 
-    # Step 2: smart background detection via edge pixels
+    # Step 2: background detection
     edge_width = 5
     h, w = arr.shape
     if h > edge_width * 2 and w > edge_width * 2:
@@ -87,36 +87,33 @@ def preprocess(pil_img):
     else:
         bg_mean = arr.mean()
 
-    # Convert to [black bg, white digit] grayscale
     if bg_mean > 127.0:
-        arr_inv = 255.0 - arr  # white bg -> black bg
+        arr_inv = 255.0 - arr
         img_inv = Image.fromarray(arr_inv.astype(np.uint8))
     else:
         arr_inv = arr
         img_inv = img_small
 
-    # Step 3: local adaptive threshold (BoxBlur radius=25)
-    #   Eliminates projection shadows from real photos
+    # Step 3: local adaptive threshold (C=30 filters bleed-through text)
     local_bg = img_inv.filter(ImageFilter.BoxBlur(radius=25))
     local_bg_arr = np.array(local_bg, dtype=np.float32)
-    C = 15.0  # contrast threshold: pixel must be C brighter than local bg
+    C = 30.0  # high threshold: pen ink >> bleed-through text
     binary_mask = arr_inv > (local_bg_arr + C)
-
     mask_img = Image.fromarray((binary_mask * 255).astype(np.uint8))
 
-    # Step 4: stroke dilation + edge smoothing
-    #   4a. MaxFilter(9): morphological dilation for thin gel/ballpoint pens
-    #       expands 1-2px thin strokes -> thick marker-like strokes (MNIST style)
-    img_thick = mask_img.filter(ImageFilter.MaxFilter(size=9))
-    #   4b. GaussianBlur(1.0): anti-alias the hard edges -> MNIST soft transitions
+    # Step 4: morphological opening (erode -> dilate)
+    #   4a. MinFilter(3): erase isolated noise speckles < 3px wide
+    img_eroded = mask_img.filter(ImageFilter.MinFilter(size=3))
+    #   4b. MaxFilter(7): dilate clean digit strokes (7 avoids filling closed loops)
+    img_thick = img_eroded.filter(ImageFilter.MaxFilter(size=7))
+    #   4c. GaussianBlur: soft anti-aliased edges
     img_smoothed = img_thick.filter(ImageFilter.GaussianBlur(radius=1.0))
-
-    # Background is now 100% pure black (0.0) via mask -- zero residual noise!
     arr_processed = np.array(img_smoothed, dtype=np.float32)
 
-    # Step 5: locate ROI from original binary_mask (avoid boundary drift from dilation)
-    rows = np.any(binary_mask, axis=1)
-    cols = np.any(binary_mask, axis=0)
+    # Step 5: ROI from eroded image (tight on real digit, not noise)
+    eroded_arr = np.array(img_eroded, dtype=np.float32) > 127
+    rows = np.any(eroded_arr, axis=1)
+    cols = np.any(eroded_arr, axis=0)
     if not rows.any() or not cols.any():
         return None
 
@@ -124,19 +121,15 @@ def preprocess(pil_img):
     x_indices = np.where(cols)[0]
     y1, y2 = y_indices[0], y_indices[-1]
     x1, x2 = x_indices[0], x_indices[-1]
-
-    pad = 8  # extra padding to accommodate dilated strokes
+    pad = 8
     y1, y2 = max(0, y1 - pad), min(arr.shape[0], y2 + pad + 1)
     x1, x2 = max(0, x1 - pad), min(arr.shape[1], x2 + pad + 1)
-
-    # Crop the dilated + smoothed + pure-bg ROI
     roi = arr_processed[y1:y2, x1:x2]
 
     # Step 6: scale to 20x20
     h_roi, w_roi = roi.shape
     scale = 20.0 / max(h_roi, w_roi)
     nh, nw = max(1, int(h_roi * scale)), max(1, int(w_roi * scale))
-
     roi_pil = Image.fromarray(roi.astype(np.uint8))
     roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
 
@@ -145,11 +138,10 @@ def preprocess(pil_img):
     ox, oy = (28 - nw) // 2, (28 - nh) // 2
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
 
-    # Step 8: normalize
-    #   Current: digit=bright(1.0), bg=dark(0.0) -> 20% training minority
-    #   Final invert: digit=dark(0.0), bg=bright(1.0) -> 80% training majority
+    # Step 8: normalize + polarity fix
+    #   Final invert: digit=dark(0), bg=bright(1) -> 80% MNIST training majority
     canvas = canvas / 255.0
-    canvas = 1.0 - canvas  # polarity fix: aligns with MNIST 80% training distribution
+    canvas = 1.0 - canvas
     canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
 
@@ -243,10 +235,9 @@ with st.expander("Debug: View Preprocessing"):
         image = Image.open(debug_file).convert("RGB")
         tensor = preprocess(image)
         if tensor is not None:
-            # Denormalize: reverse MNIST norm + reverse polarity fix -> [0,1] for display
             disp = tensor.squeeze().numpy()
-            disp = (disp * 0.3081) + 0.1307  # reverse Normalize
-            disp = 1.0 - disp                # reverse polarity invert
+            disp = (disp * 0.3081) + 0.1307
+            disp = 1.0 - disp
             disp = np.clip(disp, 0, 1)
             st.image(disp, width=280, caption="Preprocessed 28x28")
         else:
