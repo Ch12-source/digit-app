@@ -8,7 +8,7 @@ Preprocessing: adaptive threshold + morphological opening + stroke dilation + pu
 import streamlit as st
 import torch, torch.nn as nn, torch.nn.functional as F
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 import os
 
 # ============================================================
@@ -69,6 +69,9 @@ class ShuffledFusionNet(nn.Module):
 #   - Final invert: digit=dark, bg=bright (80% training majority)
 # ============================================================
 def preprocess(pil_img):
+    # Step 0: auto-correct EXIF orientation (phone camera rotation metadata)
+    pil_img = ImageOps.exif_transpose(pil_img)
+
     # Step 1: grayscale + resize to 280x280
     img_small = pil_img.convert("L").resize((280, 280), Image.LANCZOS)
     arr = np.array(img_small, dtype=np.float32)
@@ -245,3 +248,4 @@ with st.expander("Debug: View Preprocessing"):
 
 st.markdown("---")
 st.caption("ShuffledFusionNet V4 . 39K params . 98.46% test accuracy . Adaptive Preprocessing")
+
