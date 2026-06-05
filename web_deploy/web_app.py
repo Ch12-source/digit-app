@@ -11,13 +11,63 @@ from PIL import Image
 import os
 
 # ============================================================
-# 预处理（保留像素渐变，匹配 MNIST 分布）
+# 模型定义: ShuffledFusionNetPlus (V4, 83K, 99.19%)
+# ============================================================
+def channel_shuffle(x, g):
+    b, c, h, w = x.shape
+    return x.view(b, g, c // g, h, w).transpose(1, 2).contiguous().view(b, c, h, w)
+
+class AMKF(nn.Module):
+    def __init__(self, ic, oc):
+        super().__init__(); m = oc // 2
+        self.b3 = nn.Sequential(nn.Conv2d(ic, m, 3, 1, 1, bias=False), nn.BatchNorm2d(m), nn.ReLU(True))
+        self.b5 = nn.Sequential(nn.Conv2d(ic, m, 5, 1, 2, bias=False), nn.BatchNorm2d(m), nn.ReLU(True))
+        self.fw = nn.Parameter(torch.ones(2, 1, 1, 1) * 0.5)
+    def forward(self, x):
+        w = F.softmax(self.fw, 0)
+        return torch.cat([self.b3(x) * w[0] * 2, self.b5(x) * w[1] * 2], 1)
+
+class SGDR(nn.Module):
+    def __init__(self, ic, oc, s=1, g=4):
+        super().__init__(); self.g = g
+        self.dw = nn.Sequential(nn.Conv2d(ic, ic, 3, s, 1, groups=ic // g, bias=False), nn.BatchNorm2d(ic), nn.ReLU(True))
+        self.gconv = nn.Sequential(nn.Conv2d(ic, ic, 1, groups=g, bias=False), nn.BatchNorm2d(ic), nn.ReLU(True))
+        self.pw = nn.Sequential(nn.Conv2d(ic, oc, 1, bias=False), nn.BatchNorm2d(oc))
+        self.sc = nn.Identity() if s == 1 and ic == oc else nn.Sequential(nn.Conv2d(ic, oc, 1, s, bias=False), nn.BatchNorm2d(oc))
+    def forward(self, x):
+        out = self.dw(x); out = channel_shuffle(out, self.g); out = self.gconv(out)
+        return F.relu(self.pw(out) + self.sc(x))
+
+class CSA(nn.Module):
+    def __init__(self, c, k=3):
+        super().__init__(); self.c1 = nn.Conv1d(1, 1, k, 1, k // 2, bias=False)
+    def forward(self, x):
+        b, c, h, w = x.shape; g = F.adaptive_avg_pool2d(x, 1).squeeze(-1).squeeze(-1)
+        return x * torch.sigmoid(self.c1(g.unsqueeze(1)).squeeze(1).unsqueeze(-1).unsqueeze(-1))
+
+class ShuffledFusionNet(nn.Module):
+    def __init__(self, nc=10):
+        super().__init__()
+        self.amkf = AMKF(1, 32); self.bn0 = nn.BatchNorm2d(32)
+        self.sgdr1 = SGDR(32, 64, 2); self.csa1 = CSA(64)
+        self.sgdr2 = SGDR(64, 96, 2); self.csa2 = CSA(96)
+        self.sgdr3 = SGDR(96, 96, 1); self.csa3 = CSA(96)
+        self.cls = nn.Conv2d(96, nc, 1); self.gap = nn.AdaptiveAvgPool2d(1)
+    def forward(self, x):
+        x = self.bn0(self.amkf(x))
+        x = self.csa1(self.sgdr1(x))
+        x = self.csa2(self.sgdr2(x))
+        x = self.csa3(self.sgdr3(x))
+        return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
+
+# ============================================================
+# 预处理
 # ============================================================
 def preprocess(pil_img):
     gray = pil_img.convert("L")
     arr = np.array(gray, dtype=np.float32)
 
-    # 智能背景色判断
+    # 智能背景色判断：取边缘像素判断白底/黑底
     edge_width = 5
     h, w = arr.shape
     if h > edge_width * 2 and w > edge_width * 2:
@@ -31,49 +81,38 @@ def preprocess(pil_img):
     else:
         bg_mean = arr.mean()
     if bg_mean > 100.0:
-        arr = 255.0 - arr
+        arr = 255.0 - arr  # 白底黑字 → 反色为黑底白字
 
-    # 仅用阈值定位数字位置（不改变像素值！）
-    binary = arr > 40
-    rows = np.any(binary, axis=1)
-    cols = np.any(binary, axis=0)
+    arr = np.where(arr > 80, 255.0, 0.0)
+
+    rows = np.any(arr > 0, axis=1)
+    cols = np.any(arr > 0, axis=0)
     if not rows.any() or not cols.any():
-        binary = arr > 15
-        rows = np.any(binary, axis=1)
-        cols = np.any(binary, axis=0)
-        if not rows.any() or not cols.any():
-            return None
-
-    y_indices = np.where(rows)[0]; x_indices = np.where(cols)[0]
-    y1, y2 = y_indices[0], y_indices[-1]; x1, x2 = x_indices[0], x_indices[-1]
-
-    # 拒绝全图误检
-    if (y2 - y1) > h * 0.9 and (x2 - x1) > w * 0.9:
         return None
 
-    # 加 padding，提取 ROI（保留原始渐变！）
-    pad_y = max(2, int((y2 - y1) * 0.15))
-    pad_x = max(2, int((x2 - x1) * 0.15))
-    y1, y2 = max(0, y1 - pad_y), min(h, y2 + pad_y)
-    x1, x2 = max(0, x1 - pad_x), min(w, x2 + pad_x)
+    y1, y2 = np.where(rows)[0][[0, -1]]
+    x1, x2 = np.where(cols)[0][[0, -1]]
+    pad = 4
+    y1, y2 = max(0, y1 - pad), min(arr.shape[0], y2 + pad + 1)
+    x1, x2 = max(0, x1 - pad), min(arr.shape[1], x2 + pad + 1)
     roi = arr[y1:y2, x1:x2]
 
-    # 缩放到 20x20
-    rh, rw = roi.shape
-    scale = 20.0 / max(rh, rw)
-    nh, nw = max(1, int(rh * scale)), max(1, int(rw * scale))
-    roi_pil = Image.fromarray(np.clip(roi, 0, 255).astype(np.uint8))
+    h, w = roi.shape
+    scale = 20.0 / max(h, w)
+    nh, nw = int(h * scale), int(w * scale)
+    if nh < 1 or nw < 1: return None
+
+    roi_pil = Image.fromarray(roi.astype(np.uint8))
     roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
 
-    # 居中到 28x28
     canvas = np.zeros((28, 28), dtype=np.float32)
     ox, oy = (28 - nw) // 2, (28 - nh) // 2
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
 
-    # MNIST 标准化
     canvas = canvas / 255.0
     canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
+
 # ============================================================
 # 加载模型
 # ============================================================
