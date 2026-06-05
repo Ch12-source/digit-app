@@ -80,7 +80,7 @@ def preprocess(pil_img):
         bg_mean = edge_pixels.mean()
     else:
         bg_mean = arr.mean()
-    if bg_mean > 127.0:
+    if bg_mean > 100.0:
         arr = 255.0 - arr  # 白底黑字 → 反色为黑底白字
 
     arr = np.where(arr > 80, 255.0, 0.0)
