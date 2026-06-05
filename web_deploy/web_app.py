@@ -61,12 +61,12 @@ class ShuffledFusionNet(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# Preprocessing: grayscale-preserving, soft-edge (matches training distribution)
+# Preprocessing: output digit=DARK, bg=BRIGHT (matches MNIST 80% majority)
 # ============================================================
 def preprocess(pil_img):
     gray = pil_img.convert("L")
-    # Light Gaussian blur: reduce paper texture, keep stroke edges
-    arr = np.array(gray.filter(ImageFilter.GaussianBlur(radius=0.7)), dtype=np.float32)
+    # Gaussian blur: smooth paper texture, preserve stroke edges
+    arr = np.array(gray.filter(ImageFilter.GaussianBlur(radius=1.0)), dtype=np.float32)
 
     # 1. Smart background detection via edge pixels
     edge_width = 5
@@ -82,17 +82,17 @@ def preprocess(pil_img):
     else:
         bg_mean = arr.mean()
     if bg_mean > 100.0:
-        arr = 255.0 - arr  # white bg -> black bg
+        arr = 255.0 - arr  # white bg -> black bg (digit becomes bright)
 
-    # 2. Gentle contrast stretch (2nd-98th percentile)
-    p_low = np.percentile(arr, 2)
-    p_high = np.percentile(arr, 98)
+    # 2. Contrast stretch
+    p_low = np.percentile(arr, 3)
+    p_high = np.percentile(arr, 97)
     if p_high - p_low > 10:
         arr = (arr - p_low) / (p_high - p_low) * 255.0
     arr = np.clip(arr, 0, 255)
 
-    # 3. Light binarization for content detection ONLY (crop from grayscale)
-    binary = np.where(arr > 50, 255.0, 0.0)
+    # 3. Light binarization for content detection ONLY
+    binary = np.where(arr > 40, 255.0, 0.0)
     rows = np.any(binary > 0, axis=1)
     cols = np.any(binary > 0, axis=0)
     if not rows.any() or not cols.any():
@@ -117,9 +117,12 @@ def preprocess(pil_img):
     canvas = np.zeros((28, 28), dtype=np.float32)
     ox, oy = (28 - nw) // 2, (28 - nh) // 2
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
-    canvas = canvas / 255.0
 
-    # 5. MNIST normalization (same as training)
+    # 5. FINAL INVERT + MNIST normalization
+    #    Current: digit=bright(1.0), bg=dark(0.0) -> matches only 20% training
+    #    Fix: invert so digit=dark(0.0), bg=bright(1.0) -> matches 80% training majority
+    canvas = canvas / 255.0
+    canvas = 1.0 - canvas  # digit dark, bg bright = MNIST majority
     canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
 
@@ -213,4 +216,4 @@ with st.expander("Tips"):
     """)
 
 st.markdown("---")
-st.caption("ShuffledFusionNet V4 - 39K params - 98.46% test accuracy")
+st.caption("ShuffledFusionNet V4 - 39K params - 98.46% test accuracy - Data Augmentation")
