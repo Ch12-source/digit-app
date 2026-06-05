@@ -2,6 +2,7 @@
 """
 Handwritten Digit Recognition - Web Deployment
 ShuffledFusionNet V4 - 39K - 98.46% - Data Augmentation
+Preprocessing: adaptive threshold + MaxFilter stroke dilation + pure black bg
 """
 
 import streamlit as st
@@ -61,14 +62,18 @@ class ShuffledFusionNet(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# Preprocessing: output digit=DARK, bg=BRIGHT (matches MNIST 80% majority)
+# Preprocessing: domain gap mitigation
+#   - Local adaptive threshold (handles uneven lighting/shadows)
+#   - MaxFilter stroke dilation (thin gel pen -> thick MNIST marker)
+#   - Pure black background via mask (no residual noise)
+#   - Final invert: digit=dark, bg=bright (80% training majority)
 # ============================================================
 def preprocess(pil_img):
-    gray = pil_img.convert("L")
-    # Gaussian blur: smooth paper texture, preserve stroke edges
-    arr = np.array(gray.filter(ImageFilter.GaussianBlur(radius=1.0)), dtype=np.float32)
+    # Step 1: grayscale + resize to 280x280 (standardized input)
+    img_small = pil_img.convert("L").resize((280, 280), Image.LANCZOS)
+    arr = np.array(img_small, dtype=np.float32)
 
-    # 1. Smart background detection via edge pixels
+    # Step 2: smart background detection via edge pixels
     edge_width = 5
     h, w = arr.shape
     if h > edge_width * 2 and w > edge_width * 2:
@@ -81,48 +86,70 @@ def preprocess(pil_img):
         bg_mean = edge_pixels.mean()
     else:
         bg_mean = arr.mean()
-    if bg_mean > 100.0:
-        arr = 255.0 - arr  # white bg -> black bg (digit becomes bright)
 
-    # 2. Contrast stretch
-    p_low = np.percentile(arr, 3)
-    p_high = np.percentile(arr, 97)
-    if p_high - p_low > 10:
-        arr = (arr - p_low) / (p_high - p_low) * 255.0
-    arr = np.clip(arr, 0, 255)
+    # Convert to [black bg, white digit] grayscale
+    if bg_mean > 127.0:
+        arr_inv = 255.0 - arr  # white bg -> black bg
+        img_inv = Image.fromarray(arr_inv.astype(np.uint8))
+    else:
+        arr_inv = arr
+        img_inv = img_small
 
-    # 3. Light binarization for content detection ONLY
-    binary = np.where(arr > 40, 255.0, 0.0)
-    rows = np.any(binary > 0, axis=1)
-    cols = np.any(binary > 0, axis=0)
+    # Step 3: local adaptive threshold (BoxBlur radius=25)
+    #   Eliminates projection shadows from real photos
+    local_bg = img_inv.filter(ImageFilter.BoxBlur(radius=25))
+    local_bg_arr = np.array(local_bg, dtype=np.float32)
+    C = 15.0  # contrast threshold: pixel must be C brighter than local bg
+    binary_mask = arr_inv > (local_bg_arr + C)
+
+    mask_img = Image.fromarray((binary_mask * 255).astype(np.uint8))
+
+    # Step 4: stroke dilation + edge smoothing
+    #   4a. MaxFilter(9): morphological dilation for thin gel/ballpoint pens
+    #       expands 1-2px thin strokes -> thick marker-like strokes (MNIST style)
+    img_thick = mask_img.filter(ImageFilter.MaxFilter(size=9))
+    #   4b. GaussianBlur(1.0): anti-alias the hard edges -> MNIST soft transitions
+    img_smoothed = img_thick.filter(ImageFilter.GaussianBlur(radius=1.0))
+
+    # Background is now 100% pure black (0.0) via mask -- zero residual noise!
+    arr_processed = np.array(img_smoothed, dtype=np.float32)
+
+    # Step 5: locate ROI from original binary_mask (avoid boundary drift from dilation)
+    rows = np.any(binary_mask, axis=1)
+    cols = np.any(binary_mask, axis=0)
     if not rows.any() or not cols.any():
         return None
 
-    y1, y2 = np.where(rows)[0][[0, -1]]
-    x1, x2 = np.where(cols)[0][[0, -1]]
-    pad = 4
+    y_indices = np.where(rows)[0]
+    x_indices = np.where(cols)[0]
+    y1, y2 = y_indices[0], y_indices[-1]
+    x1, x2 = x_indices[0], x_indices[-1]
+
+    pad = 8  # extra padding to accommodate dilated strokes
     y1, y2 = max(0, y1 - pad), min(arr.shape[0], y2 + pad + 1)
     x1, x2 = max(0, x1 - pad), min(arr.shape[1], x2 + pad + 1)
-    # Crop from GRAYSCALE (preserve soft edges!)
-    roi = arr[y1:y2, x1:x2]
 
-    # 4. Resize to 20x20 on 28x28 canvas (MNIST-style)
-    rh, rw = roi.shape
-    scale = 20.0 / max(rh, rw)
-    nh, nw = int(rh * scale), int(rw * scale)
-    if nh < 1 or nw < 1:
-        return None
+    # Crop the dilated + smoothed + pure-bg ROI
+    roi = arr_processed[y1:y2, x1:x2]
+
+    # Step 6: scale to 20x20
+    h_roi, w_roi = roi.shape
+    scale = 20.0 / max(h_roi, w_roi)
+    nh, nw = max(1, int(h_roi * scale)), max(1, int(w_roi * scale))
+
     roi_pil = Image.fromarray(roi.astype(np.uint8))
     roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
+
+    # Step 7: center on 28x28 canvas
     canvas = np.zeros((28, 28), dtype=np.float32)
     ox, oy = (28 - nw) // 2, (28 - nh) // 2
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
 
-    # 5. FINAL INVERT + MNIST normalization
-    #    Current: digit=bright(1.0), bg=dark(0.0) -> matches only 20% training
-    #    Fix: invert so digit=dark(0.0), bg=bright(1.0) -> matches 80% training majority
+    # Step 8: normalize
+    #   Current: digit=bright(1.0), bg=dark(0.0) -> 20% training minority
+    #   Final invert: digit=dark(0.0), bg=bright(1.0) -> 80% training majority
     canvas = canvas / 255.0
-    canvas = 1.0 - canvas  # digit dark, bg bright = MNIST majority
+    canvas = 1.0 - canvas  # polarity fix: aligns with MNIST 80% training distribution
     canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
 
@@ -144,14 +171,14 @@ def load_model():
 st.set_page_config(page_title="Handwritten Digit Recognition", page_icon="=", layout="centered")
 
 st.title("Handwritten Digit Recognition")
-st.caption("ShuffledFusionNet V4 - 39K - 98.46% - Data Augmentation")
+st.caption("ShuffledFusionNet V4 . 39K . 98.46% . Adaptive Preprocessing")
 
 model = load_model()
 
 tab1, tab2 = st.tabs(["Camera", "Upload"])
 
 with tab1:
-    st.caption("Take a photo of a handwritten digit (even lighting works best)")
+    st.caption("Take a photo (even lighting, white paper + black pen works best)")
     img_file = st.camera_input("", label_visibility="collapsed")
 
     if img_file is not None:
@@ -208,12 +235,20 @@ with tab2:
                 with cols[i]:
                     st.metric(f"#{i+1}", str(idx), f"{probs[idx]*100:.1f}%")
 
-with st.expander("Tips"):
-    st.markdown("""
-    - **Camera**: Use bright, even lighting. Avoid shadows on the paper.
-    - **Upload**: White paper + black pen works best.
-    - Keep digit centered and clear.
-    """)
+with st.expander("Debug: View Preprocessing"):
+    st.caption("Upload or capture an image to see the preprocessed 28x28 output")
+    if "debug_file" not in st.session_state:
+        st.session_state.debug_file = None
+    debug_file = st.file_uploader("Debug image", type=["png", "jpg", "jpeg", "bmp"],
+                                   key="debug_upload", label_visibility="collapsed")
+    if debug_file is not None:
+        image = Image.open(debug_file).convert("RGB")
+        tensor = preprocess(image)
+        if tensor is not None:
+            debug_arr = tensor.squeeze().numpy()
+            st.image(debug_arr, width=280, caption="Preprocessed 28x28 (normalized values)")
+        else:
+            st.error("No digit detected in debug image")
 
 st.markdown("---")
-st.caption("ShuffledFusionNet V4 - 39K params - 98.46% test accuracy - Data Augmentation")
+st.caption("ShuffledFusionNet V4 . 39K params . 98.46% test accuracy . Adaptive Preprocessing")
