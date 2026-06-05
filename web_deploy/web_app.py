@@ -1,17 +1,16 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-手写数字识别 - Web端部署
-ShuffledFusionNet V4 · 39K · 98.46% · 数据增强
+鎵嬪啓鏁板瓧璇嗗埆 - Web绔儴缃?ShuffledFusionNet V4 路 39K 路 98.46% 路 鏁版嵁澧炲己
 """
 
 import streamlit as st
 import torch, torch.nn as nn, torch.nn.functional as F
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 import os
 
 # ============================================================
-# 模型定义: ShuffledFusionNet (V4, 39K)
+# 妯″瀷瀹氫箟: ShuffledFusionNet (V4, 39K)
 # ============================================================
 def channel_shuffle(x, g):
     b, c, h, w = x.shape
@@ -61,14 +60,14 @@ class ShuffledFusionNet(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# 预处理（对比度拉伸 + 智能背景判断）
-# ============================================================
+# 棰勫鐞嗭紙瀵规瘮搴︽媺浼?+ 鏅鸿兘鑳屾櫙鍒ゆ柇锛?# ============================================================
 def preprocess(pil_img):
     gray = pil_img.convert("L")
     arr = np.array(gray, dtype=np.float32)
+    # 高斯模糊降噪（减少真实纸张纹理和阴影噪声）
+    arr = np.array(gray.filter(ImageFilter.GaussianBlur(radius=1.2)), dtype=np.float32)
 
-    # 1. 智能背景色判断
-    edge_width = 5
+    # 1. 鏅鸿兘鑳屾櫙鑹插垽鏂?    edge_width = 5
     h, w = arr.shape
     if h > edge_width * 2 and w > edge_width * 2:
         edge_pixels = np.concatenate([
@@ -81,16 +80,15 @@ def preprocess(pil_img):
     else:
         bg_mean = arr.mean()
     if bg_mean > 100.0:
-        arr = 255.0 - arr  # 白底 -> 反色为黑底
-
-    # 2. 对比度拉伸（解决纸张偏灰、光线不均）
+        arr = 255.0 - arr  # 鐧藉簳 -> 鍙嶈壊涓洪粦搴?
+    # 2. 瀵规瘮搴︽媺浼革紙瑙ｅ喅绾稿紶鍋忕伆銆佸厜绾夸笉鍧囷級
     p_low = np.percentile(arr, 5)
     p_high = np.percentile(arr, 95)
     if p_high - p_low > 10:
         arr = (arr - p_low) / (p_high - p_low) * 255.0
     arr = np.clip(arr, 0, 255)
 
-    # 3. 二值化 + 定位数字
+    # 3. 浜屽€煎寲 + 瀹氫綅鏁板瓧
     arr = np.where(arr > 80, 255.0, 0.0)
     rows = np.any(arr > 0, axis=1)
     cols = np.any(arr > 0, axis=0)
@@ -104,7 +102,7 @@ def preprocess(pil_img):
     x1, x2 = max(0, x1 - pad), min(w, x2 + pad + 1)
     roi = arr[y1:y2, x1:x2]
 
-    # 4. 缩放到20x20，居中到28x28
+    # 4. 缂╂斁鍒?0x20锛屽眳涓埌28x28
     rh, rw = roi.shape
     scale = 20.0 / max(rh, rw)
     nh, nw = int(rh * scale), int(rw * scale)
@@ -116,12 +114,11 @@ def preprocess(pil_img):
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
     canvas = canvas / 255.0
 
-    # 5. MNIST标准化
-    canvas = (canvas - 0.1307) / 0.3081
+    # 5. MNIST鏍囧噯鍖?    canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
 
 # ============================================================
-# 加载模型
+# 鍔犺浇妯″瀷
 # ============================================================
 @st.cache_resource
 def load_model():
@@ -135,17 +132,17 @@ def load_model():
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="手写数字识别", page_icon="✍️", layout="centered")
+st.set_page_config(page_title="鎵嬪啓鏁板瓧璇嗗埆", page_icon="鉁嶏笍", layout="centered")
 
-st.title("✍️ 手写数字识别")
-st.caption("ShuffledFusionNet V4 · 39K · 98.46% · 综合数据增强")
+st.title("鉁嶏笍 鎵嬪啓鏁板瓧璇嗗埆")
+st.caption("ShuffledFusionNet V4 路 39K 路 98.46% 路 缁煎悎鏁版嵁澧炲己")
 
 model = load_model()
 
-tab1, tab2 = st.tabs(["📸 拍照识别", "📁 上传图片"])
+tab1, tab2 = st.tabs(["馃摳 鎷嶇収璇嗗埆", "馃搧 涓婁紶鍥剧墖"])
 
 with tab1:
-    st.caption("对准白纸上的手写数字拍照")
+    st.caption("瀵瑰噯鐧界焊涓婄殑鎵嬪啓鏁板瓧鎷嶇収")
     img_file = st.camera_input("", label_visibility="collapsed")
 
     if img_file is not None:
@@ -154,7 +151,7 @@ with tab1:
         tensor = preprocess(image)
 
         if tensor is None:
-            st.error("未检测到数字，请确保数字清晰居中")
+            st.error("鏈娴嬪埌鏁板瓧锛岃纭繚鏁板瓧娓呮櫚灞呬腑")
         else:
             with torch.no_grad():
                 logits = model(tensor)
@@ -166,10 +163,10 @@ with tab1:
             with col1:
                 st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
             with col2:
-                st.progress(float(conf), text=f"置信度: {conf*100:.1f}%")
+                st.progress(float(conf), text=f"缃俊搴? {conf*100:.1f}%")
 
 with tab2:
-    st.caption("上传手写数字图片（PNG/JPG/BMP）")
+    st.caption("涓婁紶鎵嬪啓鏁板瓧鍥剧墖锛圥NG/JPG/BMP锛?)
     img_file = st.file_uploader("", type=["png", "jpg", "jpeg", "bmp"], label_visibility="collapsed")
 
     if img_file is not None:
@@ -178,7 +175,7 @@ with tab2:
         tensor = preprocess(image)
 
         if tensor is None:
-            st.error("未检测到数字")
+            st.error("鏈娴嬪埌鏁板瓧")
         else:
             with torch.no_grad():
                 logits = model(tensor)
@@ -190,7 +187,7 @@ with tab2:
             with col1:
                 st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
             with col2:
-                st.progress(float(conf), text=f"置信度: {conf*100:.1f}%")
+                st.progress(float(conf), text=f"缃俊搴? {conf*100:.1f}%")
 
 st.markdown("---")
-st.caption("ShuffledFusionNet V4 · 蔡磊实践课 · 大数据综合实践")
+st.caption("ShuffledFusionNet V4 路 钄＄瀹炶返璇?路 澶ф暟鎹患鍚堝疄璺?)
