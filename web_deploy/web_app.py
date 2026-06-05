@@ -1,6 +1,7 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-鎵嬪啓鏁板瓧璇嗗埆 - Web绔儴缃?ShuffledFusionNet V4 路 39K 路 98.46% 路 鏁版嵁澧炲己
+Handwritten Digit Recognition - Web Deployment
+ShuffledFusionNet V4 - 39K - 98.46% - Data Augmentation
 """
 
 import streamlit as st
@@ -10,7 +11,7 @@ from PIL import Image, ImageFilter
 import os
 
 # ============================================================
-# 妯″瀷瀹氫箟: ShuffledFusionNet (V4, 39K)
+# Model: ShuffledFusionNet (V4, 39K)
 # ============================================================
 def channel_shuffle(x, g):
     b, c, h, w = x.shape
@@ -60,14 +61,15 @@ class ShuffledFusionNet(nn.Module):
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
-# 棰勫鐞嗭紙瀵规瘮搴︽媺浼?+ 鏅鸿兘鑳屾櫙鍒ゆ柇锛?# ============================================================
+# Preprocessing: grayscale-preserving, soft-edge (matches training distribution)
+# ============================================================
 def preprocess(pil_img):
     gray = pil_img.convert("L")
-    arr = np.array(gray, dtype=np.float32)
-    # 高斯模糊降噪（减少真实纸张纹理和阴影噪声）
-    arr = np.array(gray.filter(ImageFilter.GaussianBlur(radius=1.2)), dtype=np.float32)
+    # Light Gaussian blur: reduce paper texture, keep stroke edges
+    arr = np.array(gray.filter(ImageFilter.GaussianBlur(radius=0.7)), dtype=np.float32)
 
-    # 1. 鏅鸿兘鑳屾櫙鑹插垽鏂?    edge_width = 5
+    # 1. Smart background detection via edge pixels
+    edge_width = 5
     h, w = arr.shape
     if h > edge_width * 2 and w > edge_width * 2:
         edge_pixels = np.concatenate([
@@ -80,33 +82,36 @@ def preprocess(pil_img):
     else:
         bg_mean = arr.mean()
     if bg_mean > 100.0:
-        arr = 255.0 - arr  # 鐧藉簳 -> 鍙嶈壊涓洪粦搴?
-    # 2. 瀵规瘮搴︽媺浼革紙瑙ｅ喅绾稿紶鍋忕伆銆佸厜绾夸笉鍧囷級
-    p_low = np.percentile(arr, 5)
-    p_high = np.percentile(arr, 95)
+        arr = 255.0 - arr  # white bg -> black bg
+
+    # 2. Gentle contrast stretch (2nd-98th percentile)
+    p_low = np.percentile(arr, 2)
+    p_high = np.percentile(arr, 98)
     if p_high - p_low > 10:
         arr = (arr - p_low) / (p_high - p_low) * 255.0
     arr = np.clip(arr, 0, 255)
 
-    # 3. 浜屽€煎寲 + 瀹氫綅鏁板瓧
-    arr = np.where(arr > 80, 255.0, 0.0)
-    rows = np.any(arr > 0, axis=1)
-    cols = np.any(arr > 0, axis=0)
+    # 3. Light binarization for content detection ONLY (crop from grayscale)
+    binary = np.where(arr > 50, 255.0, 0.0)
+    rows = np.any(binary > 0, axis=1)
+    cols = np.any(binary > 0, axis=0)
     if not rows.any() or not cols.any():
         return None
 
     y1, y2 = np.where(rows)[0][[0, -1]]
     x1, x2 = np.where(cols)[0][[0, -1]]
     pad = 4
-    y1, y2 = max(0, y1 - pad), min(h, y2 + pad + 1)
-    x1, x2 = max(0, x1 - pad), min(w, x2 + pad + 1)
+    y1, y2 = max(0, y1 - pad), min(arr.shape[0], y2 + pad + 1)
+    x1, x2 = max(0, x1 - pad), min(arr.shape[1], x2 + pad + 1)
+    # Crop from GRAYSCALE (preserve soft edges!)
     roi = arr[y1:y2, x1:x2]
 
-    # 4. 缂╂斁鍒?0x20锛屽眳涓埌28x28
+    # 4. Resize to 20x20 on 28x28 canvas (MNIST-style)
     rh, rw = roi.shape
     scale = 20.0 / max(rh, rw)
     nh, nw = int(rh * scale), int(rw * scale)
-    if nh < 1 or nw < 1: return None
+    if nh < 1 or nw < 1:
+        return None
     roi_pil = Image.fromarray(roi.astype(np.uint8))
     roi_rs = roi_pil.resize((nw, nh), Image.LANCZOS)
     canvas = np.zeros((28, 28), dtype=np.float32)
@@ -114,11 +119,12 @@ def preprocess(pil_img):
     canvas[oy:oy + nh, ox:ox + nw] = np.array(roi_rs, dtype=np.float32)
     canvas = canvas / 255.0
 
-    # 5. MNIST鏍囧噯鍖?    canvas = (canvas - 0.1307) / 0.3081
+    # 5. MNIST normalization (same as training)
+    canvas = (canvas - 0.1307) / 0.3081
     return torch.from_numpy(canvas).unsqueeze(0).unsqueeze(0)
 
 # ============================================================
-# 鍔犺浇妯″瀷
+# Model loader
 # ============================================================
 @st.cache_resource
 def load_model():
@@ -132,17 +138,17 @@ def load_model():
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="鎵嬪啓鏁板瓧璇嗗埆", page_icon="鉁嶏笍", layout="centered")
+st.set_page_config(page_title="Handwritten Digit Recognition", page_icon="=", layout="centered")
 
-st.title("鉁嶏笍 鎵嬪啓鏁板瓧璇嗗埆")
-st.caption("ShuffledFusionNet V4 路 39K 路 98.46% 路 缁煎悎鏁版嵁澧炲己")
+st.title("Handwritten Digit Recognition")
+st.caption("ShuffledFusionNet V4 - 39K - 98.46% - Data Augmentation")
 
 model = load_model()
 
-tab1, tab2 = st.tabs(["馃摳 鎷嶇収璇嗗埆", "馃搧 涓婁紶鍥剧墖"])
+tab1, tab2 = st.tabs(["Camera", "Upload"])
 
 with tab1:
-    st.caption("瀵瑰噯鐧界焊涓婄殑鎵嬪啓鏁板瓧鎷嶇収")
+    st.caption("Take a photo of a handwritten digit (even lighting works best)")
     img_file = st.camera_input("", label_visibility="collapsed")
 
     if img_file is not None:
@@ -151,7 +157,7 @@ with tab1:
         tensor = preprocess(image)
 
         if tensor is None:
-            st.error("鏈娴嬪埌鏁板瓧锛岃纭繚鏁板瓧娓呮櫚灞呬腑")
+            st.error("No digit detected. Make sure the digit is clear and centered.")
         else:
             with torch.no_grad():
                 logits = model(tensor)
@@ -161,12 +167,14 @@ with tab1:
 
             col1, col2 = st.columns([1, 2])
             with col1:
-                st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
+                st.markdown(f"<h1 style=''font-size:80px;text-align:center;margin:0;''>{pred}</h1>", unsafe_allow_html=True)
             with col2:
-                st.progress(float(conf), text=f"缃俊搴? {conf*100:.1f}%")
+                st.progress(float(conf), text=f"Confidence: {conf*100:.1f}%")
+                if conf < 0.7:
+                    st.warning("Low confidence, try again with better lighting")
 
 with tab2:
-    st.caption("涓婁紶鎵嬪啓鏁板瓧鍥剧墖锛圥NG/JPG/BMP锛?)
+    st.caption("Upload a handwritten digit image (PNG/JPG/BMP)")
     img_file = st.file_uploader("", type=["png", "jpg", "jpeg", "bmp"], label_visibility="collapsed")
 
     if img_file is not None:
@@ -175,7 +183,7 @@ with tab2:
         tensor = preprocess(image)
 
         if tensor is None:
-            st.error("鏈娴嬪埌鏁板瓧")
+            st.error("No digit detected")
         else:
             with torch.no_grad():
                 logits = model(tensor)
@@ -185,9 +193,24 @@ with tab2:
 
             col1, col2 = st.columns([1, 2])
             with col1:
-                st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
+                st.markdown(f"<h1 style=''font-size:80px;text-align:center;margin:0;''>{pred}</h1>", unsafe_allow_html=True)
             with col2:
-                st.progress(float(conf), text=f"缃俊搴? {conf*100:.1f}%")
+                st.progress(float(conf), text=f"Confidence: {conf*100:.1f}%")
+
+            top3 = np.argsort(probs)[::-1][:3]
+            st.markdown("---")
+            st.caption("Top-3 Predictions:")
+            cols = st.columns(3)
+            for i, idx in enumerate(top3):
+                with cols[i]:
+                    st.metric(f"#{i+1}", str(idx), f"{probs[idx]*100:.1f}%")
+
+with st.expander("Tips"):
+    st.markdown("""
+    - **Camera**: Use bright, even lighting. Avoid shadows on the paper.
+    - **Upload**: White paper + black pen works best.
+    - Keep digit centered and clear.
+    """)
 
 st.markdown("---")
-st.caption("ShuffledFusionNet V4 路 钄＄瀹炶返璇?路 澶ф暟鎹患鍚堝疄璺?)
+st.caption("ShuffledFusionNet V4 - 39K params - 98.46% test accuracy")
