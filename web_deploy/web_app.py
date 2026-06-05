@@ -1,7 +1,7 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 手写数字识别 - Web端部署
-ShuffledFusionNetPlus V4 · 83K · 99.19% · 综合数据增强
+ShuffledFusionNet V4 · 83K · 99.19% · 综合数据增强
 """
 
 import streamlit as st
@@ -45,24 +45,19 @@ class CSA(nn.Module):
         b, c, h, w = x.shape; g = F.adaptive_avg_pool2d(x, 1).squeeze(-1).squeeze(-1)
         return x * torch.sigmoid(self.c1(g.unsqueeze(1)).squeeze(1).unsqueeze(-1).unsqueeze(-1))
 
-class ShuffledFusionNetPlus(nn.Module):
+class ShuffledFusionNet(nn.Module):
     def __init__(self, nc=10):
         super().__init__()
         self.amkf = AMKF(1, 32); self.bn0 = nn.BatchNorm2d(32)
         self.sgdr1 = SGDR(32, 64, 2); self.csa1 = CSA(64)
         self.sgdr2 = SGDR(64, 96, 2); self.csa2 = CSA(96)
         self.sgdr3 = SGDR(96, 96, 1); self.csa3 = CSA(96)
-        self.sgdr4 = SGDR(96, 128, 1); self.csa4 = CSA(128)
-        self.cross_skip = nn.Sequential(nn.Conv2d(96, 128, 1, bias=False), nn.BatchNorm2d(128))
-        self.cls = nn.Conv2d(128, nc, 1); self.gap = nn.AdaptiveAvgPool2d(1)
+        self.cls = nn.Conv2d(96, nc, 1); self.gap = nn.AdaptiveAvgPool2d(1)
     def forward(self, x):
         x = self.bn0(self.amkf(x))
         x = self.csa1(self.sgdr1(x))
         x = self.csa2(self.sgdr2(x))
-        skip = self.cross_skip(x)
         x = self.csa3(self.sgdr3(x))
-        x = self.sgdr4(x) + skip
-        x = self.csa4(x)
         return self.gap(self.cls(x)).squeeze(-1).squeeze(-1)
 
 # ============================================================
@@ -123,7 +118,7 @@ def preprocess(pil_img):
 # ============================================================
 @st.cache_resource
 def load_model():
-    m = ShuffledFusionNetPlus()
+    m = ShuffledFusionNet()
     path = os.path.join(os.path.dirname(__file__), "best_model.pth")
     state = torch.load(path, map_location="cpu", weights_only=True)
     m.load_state_dict(state)
@@ -136,7 +131,7 @@ def load_model():
 st.set_page_config(page_title="手写数字识别", page_icon="✍️", layout="centered")
 
 st.title("✍️ 手写数字识别")
-st.caption("ShuffledFusionNetPlus V4 · 83K · 99.19% · 综合数据增强训练")
+st.caption("ShuffledFusionNet V4 · 83K · 99.19% · 综合数据增强训练")
 
 model = load_model()
 
@@ -208,4 +203,4 @@ with st.expander("💡 使用技巧"):
     """)
 
 st.markdown("---")
-st.caption("ShuffledFusionNetPlus V4 · 99.19% · 蔡磊实践课 · 大数据综合实践")
+st.caption("ShuffledFusionNet V4 · 99.19% · 蔡磊实践课 · 大数据综合实践")
