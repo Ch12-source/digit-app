@@ -197,7 +197,7 @@ with tab1:
 
             col1, col2 = st.columns([1, 2])
             with col1:
-                st.markdown(f"<h1 style=''font-size:80px;text-align:center;margin:0;''>{pred}</h1>", unsafe_allow_html=True)
+                st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
             with col2:
                 st.progress(float(conf), text=f"Confidence: {conf*100:.1f}%")
                 if conf < 0.7:
@@ -223,7 +223,7 @@ with tab2:
 
             col1, col2 = st.columns([1, 2])
             with col1:
-                st.markdown(f"<h1 style=''font-size:80px;text-align:center;margin:0;''>{pred}</h1>", unsafe_allow_html=True)
+                st.markdown(f"<h1 style='font-size:80px;text-align:center;margin:0;'>{pred}</h1>", unsafe_allow_html=True)
             with col2:
                 st.progress(float(conf), text=f"Confidence: {conf*100:.1f}%")
 
@@ -236,17 +236,19 @@ with tab2:
                     st.metric(f"#{i+1}", str(idx), f"{probs[idx]*100:.1f}%")
 
 with st.expander("Debug: View Preprocessing"):
-    st.caption("Upload or capture an image to see the preprocessed 28x28 output")
-    if "debug_file" not in st.session_state:
-        st.session_state.debug_file = None
+    st.caption("Upload an image to see the preprocessed 28x28 output")
     debug_file = st.file_uploader("Debug image", type=["png", "jpg", "jpeg", "bmp"],
                                    key="debug_upload", label_visibility="collapsed")
     if debug_file is not None:
         image = Image.open(debug_file).convert("RGB")
         tensor = preprocess(image)
         if tensor is not None:
-            debug_arr = tensor.squeeze().numpy()
-            st.image(debug_arr, width=280, caption="Preprocessed 28x28 (normalized values)")
+            # Denormalize: reverse MNIST norm + reverse polarity fix -> [0,1] for display
+            disp = tensor.squeeze().numpy()
+            disp = (disp * 0.3081) + 0.1307  # reverse Normalize
+            disp = 1.0 - disp                # reverse polarity invert
+            disp = np.clip(disp, 0, 1)
+            st.image(disp, width=280, caption="Preprocessed 28x28")
         else:
             st.error("No digit detected in debug image")
 
